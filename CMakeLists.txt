@@ -4,13 +4,16 @@ project(SimpleChat LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Qt6 path
+# Qt6 path 
 set(CMAKE_PREFIX_PATH "/opt/homebrew/opt/qt")
 
 # Enable automatic moc, uic, and rcc
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
+
+# Runtime output to build directory
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
 # Find Qt6 modules
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
