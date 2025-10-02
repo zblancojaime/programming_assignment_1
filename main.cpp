@@ -3,12 +3,13 @@
 
 int main(int argc, char *argv[])
 {
-    QApplication app(argc, argv); // Create Qt application
+    QApplication app(argc, argv);
 
-    ChatWindow window;                   // Create main chat window
-    window.setWindowTitle("SimpleChat"); // Set window title
-    window.resize(400, 300);             // Set initial window size
-    window.show();                       // Show the window
+    // Example IDs and ports for testing a single instance
+    ChatWindow window("1", 9001, "2", 9002);
+    window.setWindowTitle("SimpleChat");
+    window.resize(400, 300);
+    window.show();
 
-    return app.exec(); // Enter Qt event loop
+    return app.exec();
 }

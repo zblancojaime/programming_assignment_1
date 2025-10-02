@@ -1,25 +1,33 @@
-#ifndef CHATWINDOW_H
-#define CHATWINDOW_H
+#pragma once // include guard
 
 #include <QWidget>
 #include <QTextEdit>
 #include <QLineEdit>
 #include <QPushButton>
-#include <QVBoxLayout>
+#include <QTcpSocket>
 
-// Main chat window class
 class ChatWindow : public QWidget
 {
-Q_OBJECT // Enables Qt signals and slots
+Q_OBJECT // required for Qt meta-object features
 
-    public : explicit ChatWindow(QWidget *parent = nullptr); // Constructor
+    public :
+    // Constructor with parameters
+    ChatWindow(QString myId, quint16 myPort, QString nextPeerId, quint16 nextPeerPort, QWidget *parent = nullptr);
+
+    // Destructor MUST be declared here
+    ~ChatWindow();
 
 private slots:
-    void sendMessage(); // Called when the send button is clicked
+    void sendMessage();       // handle send button click
+    void onMessageReceived(); // handle incoming messages
 
 private:
-    QTextEdit *chatLog; // Area that displays chat messages
-    QLineEdit *input;   // Input field for typing messages
+    QTextEdit *chatLog;
+    QLineEdit *input;
+    QTcpSocket *socket;
+    QString myId;
+    quint16 myPort;
+    QString nextPeerId;
+    quint16 nextPeerPort;
+    int sequenceNumber;
 };
-
-#endif // CHATWINDOW_H

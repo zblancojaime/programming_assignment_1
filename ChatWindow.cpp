@@ -1,34 +1,45 @@
 #include "ChatWindow.h"
+#include <QVBoxLayout>
+#include <QVariantMap>
 
-// Constructor: sets up GUI elements
-ChatWindow::ChatWindow(QWidget *parent)
-    : QWidget(parent)
+ChatWindow::ChatWindow(QString myId, quint16 myPort, QString nextPeerId, quint16 nextPeerPort, QWidget *parent)
+    : QWidget(parent), myId(myId), myPort(myPort), nextPeerId(nextPeerId), nextPeerPort(nextPeerPort), sequenceNumber(1)
 {
-    QVBoxLayout *layout = new QVBoxLayout(this); // Layout for vertical stacking
+    QVBoxLayout *layout = new QVBoxLayout(this);
 
-    chatLog = new QTextEdit(this); // Chat display area
-    chatLog->setReadOnly(true);    // Users cannot edit chat log
+    chatLog = new QTextEdit(this);
+    chatLog->setReadOnly(true);
 
-    input = new QLineEdit(this);                             // Text input field
-    QPushButton *sendButton = new QPushButton("Send", this); // Send button
+    input = new QLineEdit(this);
+    QPushButton *sendButton = new QPushButton("Send", this);
 
-    // Add widgets to layout
     layout->addWidget(chatLog);
     layout->addWidget(input);
     layout->addWidget(sendButton);
 
-    // Connect button click to sendMessage slot
     connect(sendButton, &QPushButton::clicked, this, &ChatWindow::sendMessage);
+
+    // TODO: initialize QTcpSocket and connect signals
 }
 
-// Slot: handles sending messages
+// Destructor definition (even empty)
+ChatWindow::~ChatWindow()
+{
+    // Qt will delete child widgets automatically
+}
+
 void ChatWindow::sendMessage()
 {
-    QString msg = input->text(); // Get text from input
+    QString msg = input->text();
     if (!msg.isEmpty())
     {
-        chatLog->append("Me: " + msg); // Append message to chat log
-        input->clear();                // Clear input field
-        // TODO: Send message via network (TCP)
+        chatLog->append("Me: " + msg);
+        input->clear();
+        // TODO: send msg to next peer
     }
+}
+
+void ChatWindow::onMessageReceived()
+{
+    // TODO: read message from socket and forward to next peer
 }

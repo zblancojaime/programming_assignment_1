@@ -4,33 +4,25 @@ project(SimpleChat LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Qt6 installation path
-set(Qt6_DIR "/opt/homebrew/opt/qt/lib/cmake/Qt6")
+# Qt6 path
+set(CMAKE_PREFIX_PATH "/opt/homebrew/opt/qt")
+
+# Enable automatic moc, uic, and rcc
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTOUIC ON)
+set(CMAKE_AUTORCC ON)
 
 # Find Qt6 modules
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
 
-# Source files
-set(SOURCES
+# Add executable
+add_executable(SimpleChat
     main.cpp
     ChatWindow.cpp
-)
-
-# Header files that require moc (Q_OBJECT)
-set(HEADERS
     ChatWindow.h
-)
-
-# Generate moc files from headers
-qt6_wrap_cpp(MOC_FILES ${HEADERS})
-
-# Create the executable including moc files
-add_executable(SimpleChat
-    ${SOURCES}
-    ${MOC_FILES}   # Include generated moc files
 )
 
 # Link Qt6 libraries
 target_link_libraries(SimpleChat
-    PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets
+    PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network
 )
