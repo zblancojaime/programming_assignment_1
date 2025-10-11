@@ -7,8 +7,11 @@
 #include <QTextEdit>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QComboBox>
+#include <QLabel>
 #include <QList>
 #include <QByteArray>
+#include <QSet>
 
 class ChatWindow : public QWidget
 {
@@ -27,6 +30,10 @@ private slots:
     void onClientConnected(); // handle next peer connection
 
 private:
+    void addKnownPeer(const QString &peerId); // add peer to dropdown if not already there
+    void sendPeerAnnouncement();              // announce this peer to the ring
+
+private:
     QString myId;           // this node's unique ID
     quint16 myPort;         // this node's listening port
     QString nextPeerId;     // next peer's ID in ring
@@ -42,8 +49,11 @@ private:
     QTextEdit *chatLog;      // display chat messages
     QLineEdit *input;        // input field
     QPushButton *sendButton; // send button
+    QComboBox *peerSelector; // dropdown to select destination peer
+    QLabel *peerLabel;       // label for peer selector
 
-    QList<QByteArray> sendQueue; // queue frames if next peer not connected
+    QList<QByteArray> sendQueue;  // queue frames if next peer not connected
+    QSet<QString> announcedPeers; // track peers we've already announced
 
     // track if we already showed connection error to next peer
     bool nextPeerConnectionErrorShown;
