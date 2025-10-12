@@ -6,16 +6,11 @@
 #include <QHostAddress>
 #include <QDebug>
 
-ChatWindow::ChatWindow(QString id, quint16 port, QString nextId, quint16 nextPort, QWidget *parent)
+ChatWindow::ChatWindow(QString id, quint16 port, QWidget *parent)
     : QWidget(parent),
       myId(id),
       myPort(port),
-      nextPeerId(nextId),
-      nextPeerPort(nextPort),
-      sequenceNumber(1),
-      maxHops(4),
-      incomingSocket(nullptr),
-      nextPeerConnectionErrorShown(false) // initialize error flag for "Connection refused"
+      sequenceNumber(1)
 {
     // Layout
     QVBoxLayout *layout = new QVBoxLayout(this);
@@ -28,6 +23,7 @@ ChatWindow::ChatWindow(QString id, quint16 port, QString nextId, quint16 nextPor
     peerLabel = new QLabel("Send to:", this);
     peerSelector = new QComboBox(this);
     peerSelector->addItem("(Select peer)"); // placeholder
+    peerSelector->addItem("BROADCAST");     // broadcast option
     peerLayout->addWidget(peerLabel);
     peerLayout->addWidget(peerSelector);
     peerLayout->addStretch(); // push to left
@@ -46,53 +42,29 @@ ChatWindow::ChatWindow(QString id, quint16 port, QString nextId, quint16 nextPor
     connect(sendButton, &QPushButton::clicked, this, &ChatWindow::sendMessage);
     connect(input, &QLineEdit::returnPressed, this, &ChatWindow::sendMessage);
 
-    // Add next peer to dropdown initially
-    addKnownPeer(nextPeerId);
+    // Set up UDP socket for sending and receiving messages
+    udpSocket = new QUdpSocket(this);
 
-    // Set up server to listen for incoming connections from previous peer
-    server = new QTcpServer(this);
-    connect(server, &QTcpServer::newConnection, this, &ChatWindow::onNewConnection);
-
-    if (!server->listen(QHostAddress::LocalHost, myPort))
+    if (!udpSocket->bind(QHostAddress::LocalHost, myPort))
     {
-        qDebug() << myId << "server failed to start on port" << myPort << ":" << server->errorString();
+        qDebug() << myId << "UDP socket failed to bind to port" << myPort << ":" << udpSocket->errorString();
     }
     else
     {
-        qDebug() << myId << "listening on port" << myPort;
+        qDebug() << myId << "UDP socket listening on port" << myPort;
     }
 
-    // Prepare client socket to connect to next peer and retry until connected
-    clientSocket = new QTcpSocket(this);
+    // Connect UDP socket to receive messages
+    connect(udpSocket, &QUdpSocket::readyRead, this, &ChatWindow::receiveMessage);
 
-    // When client socket connects, flush queued frames
-    connect(clientSocket, &QTcpSocket::connected, this, &ChatWindow::onClientConnected);
+    // Set up discovery timer to periodically discover peers
+    discoveryTimer = new QTimer(this);
+    discoveryTimer->setInterval(5000); // every 5 seconds
+    connect(discoveryTimer, &QTimer::timeout, this, &ChatWindow::discoverPeers);
+    discoveryTimer->start();
 
-    // Log socket errors (show "Connection refused" only once)
-    connect(clientSocket, QOverload<QAbstractSocket::SocketError>::of(&QAbstractSocket::errorOccurred),
-            this, [this](QAbstractSocket::SocketError)
-            {
-                if (clientSocket->error() == QAbstractSocket::ConnectionRefusedError)
-                {
-                    if (!nextPeerConnectionErrorShown)
-                    {
-                        qDebug() << myId << "client socket error: Connection refused";
-                        nextPeerConnectionErrorShown = true; // prevent repeating
-                    }
-                }
-                else
-                {
-                    qDebug() << myId << "client socket error:" << clientSocket->errorString();
-                } });
-
-    // Start retry timer (attempt connect every 1s)
-    retryTimer = new QTimer(this);
-    retryTimer->setInterval(1000);
-    connect(retryTimer, &QTimer::timeout, this, &ChatWindow::tryConnect);
-    retryTimer->start();
-
-    // initial attempt to connect to next peer
-    tryConnect();
+    // Initial peer discovery
+    discoverPeers();
 }
 
 // Destructor MUST be declared here
@@ -116,342 +88,239 @@ void ChatWindow::sendMessage()
         return;
     }
 
-    chatLog->append("Me to " + selectedPeer + ": " + msg); // display locally
     input->clear();
 
-    // create message map
+    // Create message map
     QVariantMap message;
+    message["MessageType"] = "Chat";
     message["ChatText"] = msg;
     message["Origin"] = myId;
-    message["Destination"] = selectedPeer; // Use selected peer as destination
     message["Sequence"] = sequenceNumber++;
-    message["HopCount"] = 1; // first hop
 
-    // serialize payload
-    QByteArray payload;
+    if (selectedPeer == "BROADCAST")
     {
-        QDataStream payloadStream(&payload, QIODevice::WriteOnly);
-        payloadStream.setVersion(QDataStream::Qt_6_0);
-        payloadStream << message;
-    }
-
-    // prefix with size
-    QByteArray frame;
-    {
-        QDataStream frameStream(&frame, QIODevice::WriteOnly);
-        frameStream.setVersion(QDataStream::Qt_6_0);
-        quint32 size = static_cast<quint32>(payload.size());
-        frameStream << size;
-        frame.append(payload);
-    }
-
-    // if connected, send; otherwise queue
-    if (clientSocket->state() == QAbstractSocket::ConnectedState)
-    {
-        qint64 written = clientSocket->write(frame);
-        clientSocket->flush();
-        qDebug() << myId << "sent" << written << "bytes to" << nextPeerId << "(hop=" << message["HopCount"].toInt() << ")";
+        message["Destination"] = -1; // -1 indicates broadcast
+        chatLog->append("Me (broadcast): " + msg);
+        broadcastMessage(message);
     }
     else
     {
-        sendQueue.append(frame);
-        qDebug() << myId << "queued message (next peer not connected yet)";
-    }
-}
+        message["Destination"] = selectedPeer;
+        chatLog->append("Me to " + selectedPeer + ": " + msg);
 
-// handle new incoming connection
-void ChatWindow::onNewConnection()
-{
-    incomingSocket = server->nextPendingConnection();
-    qDebug() << myId << "accepted connection from previous peer";
-
-    connect(incomingSocket, &QTcpSocket::readyRead, this, &ChatWindow::receiveMessage);
-}
-
-// receive readyRead data from previous peer
-void ChatWindow::receiveMessage()
-{
-    if (!incomingSocket)
-        return;
-
-    QDataStream in(incomingSocket);
-    in.setVersion(QDataStream::Qt_6_0);
-
-    while (true)
-    {
-        // Need at least 4 bytes for the length prefix
-        if (incomingSocket->bytesAvailable() < (int)sizeof(quint32))
-            break;
-
-        // Peek header (4 bytes) to get payload size
-        QByteArray header = incomingSocket->peek(sizeof(quint32));
-        if (header.size() < (int)sizeof(quint32))
-            break;
-
-        QDataStream headerStream(header);
-        headerStream.setVersion(QDataStream::Qt_6_0);
-        quint32 blockSize = 0;
-        headerStream >> blockSize;
-
-        // Wait for entire frame (size prefix + payload)
-        if (incomingSocket->bytesAvailable() < (int)sizeof(quint32) + blockSize)
-            break;
-
-        // Consume size prefix
-        incomingSocket->read((qint64)sizeof(quint32));
-
-        // Read payload
-        QByteArray payload;
-        payload.resize(blockSize);
-        qint64 got = incomingSocket->read(payload.data(), blockSize);
-        if (got != blockSize)
+        // Send directly to the selected peer
+        if (knownPeers.contains(selectedPeer))
         {
-            qDebug() << myId << "failed to read payload (got" << got << "expected" << blockSize << ")";
-            break;
-        }
-
-        // Deserialize payload into QVariantMap
-        QVariantMap message;
-        {
-            QDataStream payloadStream(&payload, QIODevice::ReadOnly);
-            payloadStream.setVersion(QDataStream::Qt_6_0);
-            payloadStream >> message;
-        }
-
-        if (message.isEmpty())
-        {
-            qDebug() << myId << "received empty/invalid message payload";
-            continue;
-        }
-
-        // read fields
-        QString messageType = message.value("MessageType").toString();
-        QString origin = message.value("Origin").toString();
-        QString destination = message.value("Destination").toString();
-        QString text = message.value("ChatText").toString();
-        int hop = message.value("HopCount").toInt();
-
-        // Add origin to known peers if not already there
-        addKnownPeer(origin);
-
-        // Handle different message types
-        if (messageType == "PeerAnnouncement")
-        {
-            // This is a peer announcement - only show if we haven't seen this peer before
-            if (!announcedPeers.contains(origin))
-            {
-                chatLog->append("[System] Peer " + origin + " joined the network");
-                announcedPeers.insert(origin);
-                qDebug() << myId << "received peer announcement from" << origin << "(first time)";
-            }
-            else
-            {
-                qDebug() << myId << "received duplicate peer announcement from" << origin << "(ignoring display)";
-            }
-
-            // Forward announcement if it's a broadcast and hasn't completed the ring
-            bool shouldForward = (destination == "ALL" && hop < maxHops);
-
-            if (shouldForward)
-            {
-                // Forward the announcement
-                message["HopCount"] = hop + 1;
-                message["Sequence"] = sequenceNumber++;
-
-                // prepare forward payload
-                QByteArray fpayload;
-                {
-                    QDataStream fpayloadStream(&fpayload, QIODevice::WriteOnly);
-                    fpayloadStream.setVersion(QDataStream::Qt_6_0);
-                    fpayloadStream << message;
-                }
-
-                QByteArray fframe;
-                {
-                    QDataStream fframeStream(&fframe, QIODevice::WriteOnly);
-                    fframeStream.setVersion(QDataStream::Qt_6_0);
-                    quint32 fsize = static_cast<quint32>(fpayload.size());
-                    fframeStream << fsize;
-                    fframe.append(fpayload);
-                }
-
-                // send or queue
-                if (clientSocket->state() == QAbstractSocket::ConnectedState)
-                {
-                    qint64 written = clientSocket->write(fframe);
-                    clientSocket->flush();
-                    qDebug() << myId << "forwarded peer announcement from" << origin;
-                }
-                else
-                {
-                    sendQueue.append(fframe);
-                    qDebug() << myId << "queued peer announcement forward";
-                }
-            }
+            PeerInfo peer = knownPeers[selectedPeer];
+            sendUdpMessage(message, peer.address, peer.port);
         }
         else
         {
-            // Regular chat message
-            // Check if this message is for us
-            bool isForMe = (destination == myId);
-
-            if (isForMe)
-            {
-                // This message is for us - display it and DON'T forward
-                chatLog->append(origin + " to me: " + text);
-                qDebug() << myId << "received message from" << origin << "(final destination reached)";
-            }
-            else
-            {
-                // This message is for someone else - display that we're forwarding it
-                chatLog->append("[Forwarding] " + origin + " to " + destination + ": " + text);
-                qDebug() << myId << "forwarding message from" << origin << "to" << destination << "(hop=" << hop << ")";
-
-                // forward to next peer only if not for us and hop < maxHops
-                if (hop < maxHops)
-                {
-                    // increment hop and update meta
-                    message["HopCount"] = hop + 1;
-                    message["Destination"] = destination; // Keep original destination
-                    message["Sequence"] = sequenceNumber++;
-
-                    // prepare forward payload with length-prefix framing
-                    QByteArray fpayload;
-                    {
-                        QDataStream fpayloadStream(&fpayload, QIODevice::WriteOnly);
-                        fpayloadStream.setVersion(QDataStream::Qt_6_0);
-                        fpayloadStream << message;
-                    }
-
-                    QByteArray fframe;
-                    {
-                        QDataStream fframeStream(&fframe, QIODevice::WriteOnly);
-                        fframeStream.setVersion(QDataStream::Qt_6_0);
-                        quint32 fsize = static_cast<quint32>(fpayload.size());
-                        fframeStream << fsize;
-                        fframe.append(fpayload);
-                    }
-
-                    // send or queue if not connected
-                    if (clientSocket->state() == QAbstractSocket::ConnectedState)
-                    {
-                        qint64 written = clientSocket->write(fframe);
-                        clientSocket->flush();
-                        qDebug() << myId << "forwarded message to" << nextPeerId
-                                 << "(newHop=" << message["HopCount"].toInt() << ", bytes=" << written << ")";
-                    }
-                    else
-                    {
-                        sendQueue.append(fframe);
-                        qDebug() << myId << "queued forward (next peer not connected yet)";
-                        // attempt to connect immediately
-                        tryConnect();
-                    }
-                }
-                else
-                {
-                    qDebug() << myId << "stopping forwarding (max hops reached)";
-                }
-            }
+            chatLog->append("Error: Peer " + selectedPeer + " not found");
         }
     }
 }
 
-// tryConnect: attempt to connect to next peer, called periodically
-void ChatWindow::tryConnect()
+// Receive UDP messages
+void ChatWindow::receiveMessage()
 {
-    if (clientSocket->state() == QAbstractSocket::ConnectedState)
+    while (udpSocket->hasPendingDatagrams())
     {
-        // already connected
-        if (retryTimer->isActive())
-            retryTimer->stop();
+        QByteArray datagram;
+        datagram.resize(udpSocket->pendingDatagramSize());
+        QHostAddress sender;
+        quint16 senderPort;
+
+        udpSocket->readDatagram(datagram.data(), datagram.size(), &sender, &senderPort);
+
+        // Deserialize the message
+        QVariantMap message;
+        QDataStream stream(&datagram, QIODevice::ReadOnly);
+        stream.setVersion(QDataStream::Qt_6_0);
+        stream >> message;
+
+        if (message.isEmpty())
+        {
+            qDebug() << myId << "received empty/invalid message";
+            continue;
+        }
+
+        processReceivedMessage(message, sender, senderPort);
+    }
+}
+
+// Process received message
+void ChatWindow::processReceivedMessage(const QVariantMap &message, const QHostAddress &sender, quint16 senderPort)
+{
+    if (message.isEmpty())
+    {
+        qDebug() << myId << "received empty/invalid message";
         return;
     }
 
-    // reset/abort then try
-    clientSocket->abort();
-    clientSocket->connectToHost(QHostAddress::LocalHost, nextPeerPort);
+    // Read message fields
+    QString messageType = message.value("MessageType").toString();
+    QString origin = message.value("Origin").toString();
+    QVariant destVar = message.value("Destination");
+    QString chatText = message.value("ChatText").toString();
+    quint32 sequence = message.value("Sequence").toUInt();
+
+    // Add origin to known peers if not already there
+    addKnownPeer(origin, sender, senderPort);
+
+    // Handle different message types
+    if (messageType == "Discovery")
+    {
+        // Only log if this is a new peer
+        if (!knownPeers.contains(origin))
+        {
+            qDebug() << myId << "received discovery message from new peer" << origin;
+        }
+        // Respond with our peer info
+        QVariantMap response;
+        response["MessageType"] = "DiscoveryResponse";
+        response["Origin"] = myId;
+        response["Destination"] = origin;
+        response["Sequence"] = sequenceNumber++;
+        sendUdpMessage(response, sender, senderPort);
+    }
+    else if (messageType == "DiscoveryResponse")
+    {
+        // Only log if this is a new peer
+        if (!knownPeers.contains(origin))
+        {
+            qDebug() << myId << "received discovery response from new peer" << origin;
+        }
+        // Peer info already added above
+    }
+    else if (messageType == "Chat")
+    {
+        // Handle chat message
+        bool isBroadcast = (destVar.toInt() == -1);
+        QString destination = destVar.toString();
+
+        if (isBroadcast)
+        {
+            // Broadcast message - display it
+            chatLog->append(origin + " (broadcast): " + chatText);
+            qDebug() << myId << "received broadcast message from" << origin;
+        }
+        else if (destination == myId)
+        {
+            // Direct message to us
+            chatLog->append(origin + " to me: " + chatText);
+            qDebug() << myId << "received direct message from" << origin;
+        }
+        else
+        {
+            // Message not for us - ignore (no forwarding in UDP broadcast model)
+            qDebug() << myId << "received message for" << destination << "from" << origin << "(ignoring)";
+        }
+    }
 }
 
-// onClientConnected: flush queued messages when connected
-void ChatWindow::onClientConnected()
+// Discover peers on the network
+void ChatWindow::discoverPeers()
 {
-    qDebug() << myId << "connected to next peer" << nextPeerId;
+    static int discoveryCount = 0;
+    discoveryCount++;
 
-    // flush queued frames
-    while (!sendQueue.isEmpty())
+    // Only log every 10th discovery to reduce spam
+    if (discoveryCount % 10 == 1)
     {
-        QByteArray frame = sendQueue.takeFirst();
-        qint64 w = clientSocket->write(frame);
-        clientSocket->flush();
-        qDebug() << myId << "flushed queued frame (" << w << " bytes) to" << nextPeerId;
+        qDebug() << myId << "performing peer discovery (count:" << discoveryCount << ")";
     }
 
-    if (retryTimer->isActive())
-        retryTimer->stop();
+    // Create discovery message
+    QVariantMap message;
+    message["MessageType"] = "Discovery";
+    message["Origin"] = myId;
+    message["Destination"] = -1; // Broadcast
+    message["Sequence"] = sequenceNumber++;
 
-    // Send peer announcement to let other peers know we exist
-    sendPeerAnnouncement();
+    // Broadcast discovery message to common port range
+    for (quint16 port = 12340; port <= 12350; ++port)
+    {
+        if (port != myPort) // Don't send to ourselves
+        {
+            sendUdpMessage(message, QHostAddress::LocalHost, port);
+        }
+    }
 }
 
-// Add peer to dropdown if not already there
-void ChatWindow::addKnownPeer(const QString &peerId)
+// Add peer to known peers and dropdown
+void ChatWindow::addKnownPeer(const QString &peerId, const QHostAddress &address, quint16 port)
 {
     // Don't add ourselves
     if (peerId == myId)
         return;
 
+    // Update or add peer info
+    PeerInfo &peer = knownPeers[peerId];
+    peer.id = peerId;
+    peer.address = address;
+    peer.port = port;
+
     // Check if peer is already in the dropdown
+    bool foundInDropdown = false;
     for (int i = 0; i < peerSelector->count(); ++i)
     {
         if (peerSelector->itemText(i) == peerId)
-            return; // Already exists
+        {
+            foundInDropdown = true;
+            break;
+        }
     }
 
-    // Add the new peer
-    peerSelector->addItem(peerId);
-    qDebug() << myId << "added peer" << peerId << "to dropdown";
+    if (!foundInDropdown)
+    {
+        // Add the new peer to dropdown
+        peerSelector->addItem(peerId);
+        qDebug() << myId << "NEW PEER DISCOVERED:" << peerId;
+
+        // Show peer joined message only once
+        if (!announcedPeers.contains(peerId))
+        {
+            chatLog->append("[System] Peer " + peerId + " joined the network");
+            announcedPeers.insert(peerId);
+        }
+    }
 }
 
-// Send peer announcement to let other peers know we exist
-void ChatWindow::sendPeerAnnouncement()
+// Send UDP message to specific address and port
+void ChatWindow::sendUdpMessage(const QVariantMap &message, const QHostAddress &address, quint16 port)
 {
-    // Create announcement message
-    QVariantMap message;
-    message["MessageType"] = "PeerAnnouncement";
-    message["Origin"] = myId;
-    message["Destination"] = "ALL"; // Broadcast to all peers
-    message["Sequence"] = sequenceNumber++;
-    message["HopCount"] = 1;
+    // Serialize the message
+    QByteArray datagram;
+    QDataStream stream(&datagram, QIODevice::WriteOnly);
+    stream.setVersion(QDataStream::Qt_6_0);
+    stream << message;
 
-    // serialize payload
-    QByteArray payload;
+    // Send the datagram
+    qint64 written = udpSocket->writeDatagram(datagram, address, port);
+    if (written == -1)
     {
-        QDataStream payloadStream(&payload, QIODevice::WriteOnly);
-        payloadStream.setVersion(QDataStream::Qt_6_0);
-        payloadStream << message;
+        // Only log failures for chat messages, not routine heartbeats/discovery
+        QString messageType = message.value("MessageType").toString();
+        if (messageType == "Chat")
+        {
+            qDebug() << myId << "failed to send chat message to" << address.toString() << ":" << port;
+        }
+    }
+}
+
+// Broadcast message to all known peers
+void ChatWindow::broadcastMessage(const QVariantMap &message)
+{
+    for (auto it = knownPeers.begin(); it != knownPeers.end(); ++it)
+    {
+        const PeerInfo &peer = it.value();
+        sendUdpMessage(message, peer.address, peer.port);
     }
 
-    // prefix with size
-    QByteArray frame;
+    // Only log if we have peers to broadcast to
+    if (knownPeers.size() > 0)
     {
-        QDataStream frameStream(&frame, QIODevice::WriteOnly);
-        frameStream.setVersion(QDataStream::Qt_6_0);
-        quint32 size = static_cast<quint32>(payload.size());
-        frameStream << size;
-        frame.append(payload);
-    }
-
-    // if connected, send; otherwise queue
-    if (clientSocket->state() == QAbstractSocket::ConnectedState)
-    {
-        qint64 written = clientSocket->write(frame);
-        clientSocket->flush();
-        qDebug() << myId << "sent peer announcement (" << written << " bytes)";
-    }
-    else
-    {
-        sendQueue.append(frame);
-        qDebug() << myId << "queued peer announcement (next peer not connected yet)";
+        qDebug() << myId << "broadcasted message to" << knownPeers.size() << "peers";
     }
 }
