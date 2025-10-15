@@ -1,19 +1,21 @@
-# SimpleChat - Programming Assignment 1
+# SimpleChat - Programming Assignment 2
 
 # Jaime Blanco
 
 ## Project Overview
 
-**SimpleChat** is a ring-based messaging application implemented in **C++ with Qt6**.  
-Each instance of the application acts as a peer in a **TCP ring network**, where messages are passed along the ring until they reach their destination.
+**SimpleChat** is a distributed peer-to-peer messaging application implemented in **C++ with Qt6**.  
+Each instance acts as a peer in a **UDP-based network** with reliable messaging and anti-entropy synchronization.
 
 This project includes:
 
-- A **Qt6 GUI** with a chat log area and text input
-- **TCP socket communication** between peers using `QTcpSocket`
-- **Message serialization** with `QVariantMap`
-- A **static peer ring topology** (A → B → C → D → A)
-- A **launch script** for automated testing with multiple peers
+- A **Qt6 GUI** with chat log area and peer selection
+- **UDP socket communication** using `QUdpSocket`
+- **Reliable messaging** with ACK/retransmission
+- **Anti-entropy system** using vector clocks
+- **Broadcast messaging** to all network peers
+- **Automatic peer discovery** on local ports
+- **Message deduplication** and ordering
 
 ---
 
@@ -21,7 +23,7 @@ This project includes:
 
 - C++17 or newer
 - [Qt6](https://doc.qt.io/qt-6/qtexamplesandtutorials.html)
-- CMake (3.15+)
+- CMake (3.16+)
 - Git (for version control)
 
 ---
@@ -30,7 +32,7 @@ This project includes:
 
 Clone the repository and build with CMake:
 
-    git clone <your-repo-url>
+    git clone -b programming-assignment-2 https://github.com/zblancojaime/programming_assignment_1.git
     cd programming_assignment_1
 
     # Create build directory
@@ -39,7 +41,7 @@ Clone the repository and build with CMake:
 
     # Run CMake
     cmake ..
-    cmake --build .
+    make
 
 The compiled binary will be located in:
 
@@ -51,47 +53,52 @@ The compiled binary will be located in:
 
 Each peer requires command-line arguments:
 
-- `-i` → unique ID (A, B, C, …)
-- `-p` → port to listen on
-- `-n` → neighbor ID
-- `-q` → neighbor’s port
+- `-i` or `--id` → unique peer identifier (A, B, C, etc.)
+- `-p` or `--port` → UDP port to listen on (recommended: 12340-12350)
 
-Example with 4 peers (A → B → C → D → A):
+Example with 4 peers:
 
-    ./build/SimpleChat -i A -p 9001 -n B -q 9002
-    ./build/SimpleChat -i B -p 9002 -n C -q 9003
-    ./build/SimpleChat -i C -p 9003 -n D -q 9004
-    ./build/SimpleChat -i D -p 9004 -n A -q 9001
+    ./build/SimpleChat --id A --port 12340
+    ./build/SimpleChat --id B --port 12341
+    ./build/SimpleChat --id C --port 12342
+    ./build/SimpleChat --id D --port 12343
 
-Each peer opens a chat window GUI, where you can type and send messages.  
-Messages are serialized, passed along the ring, and delivered to the correct destination.
+Each peer opens a chat window GUI with:
 
----
+- **Chat log**: Displays all messages and system events
+- **Peer selector**: Choose recipient or "BROADCAST"
+- **Message input**: Type and send messages
 
-## Script Usage
-
-### Ring Launch Script
-
-The script `run_ring_test.sh` automatically starts a 4-peer ring (A, B, C, D):
-
-    #!/bin/bash
-
-    # Clear old logs
-    rm -f A.log B.log C.log D.log
-
-    # Launch peers in background with logs
-    ./build/SimpleChat -i A -p 9001 -n B -q 9002 > A.log 2>&1 &
-    ./build/SimpleChat -i B -p 9002 -n C -q 9003 > B.log 2>&1 &
-    ./build/SimpleChat -i C -p 9003 -n D -q 9004 > C.log 2>&1 &
-    ./build/SimpleChat -i D -p 9004 -n A -q 9001 > D.log 2>&1 &
-
-    echo "SimpleChat ring launched (A-B-C-D). Logs saved to A.log, B.log, C.log, D.log."
-
-Run it:
-
-    ./run_ring_test.sh
+Peers automatically discover each other on the local network.
 
 ---
+
+## Testing Script
+
+Use the automated test script to launch all 4 peers and create log files:
+
+```bash
+chmod +x test_script.sh
+./test_script.sh
+```
+
+Press Ctrl+C to stop all peers when finished testing.
+
+### Manual Testing
+
+1. Start multiple instances using different terminals
+2. Wait for peer discovery (5-10 seconds)
+3. Send direct messages between peers
+4. Test broadcast functionality
+5. Verify message ordering and anti-entropy
+
+### Testing Features
+
+- **Direct messaging**: Select a peer and send messages
+- **Broadcast**: Select "BROADCAST" to send to all peers
+- **Reliability**: Messages are automatically retransmitted if no ACK received
+- **Anti-entropy**: Peers sync message histories every 10 seconds
+- **Peer discovery**: New peers are automatically discovered and added
 
 ### Useful Commands
 
@@ -102,38 +109,3 @@ View logs in real-time:
 Kill all peers:
 
     pkill SimpleChat
-
-Manually clear logs:
-
-    rm -f A.log B.log C.log D.log
-
----
-
-## Testing
-
-### Basic Propagation
-
-- Launch the full 4-peer ring (A, B, C, D).
-- Send a message from A → it should travel A → B → C → D and be delivered.
-- Verify logs: each peer prints receipt and forwarding.
-
-### Message Ordering
-
-- Send multiple messages in quick succession.
-- Ensure sequence numbers are consistent and messages arrive in correct order.
-
-### Two-Peer Test
-
-- Run only A and B.
-- Verify messages are delivered directly without traveling around the full ring.
-
-### Full Ring Test
-
-- Run all 4 peers (A, B, C, D).
-- Send messages between arbitrary peers (e.g., C → A).
-- Confirm they circulate the expected number of hops before delivery.
-
-### Script Validation
-
-- Use `run_ring_test.sh` to automate setup.
-- Confirm logs are cleared before each run and contain only current test output.
